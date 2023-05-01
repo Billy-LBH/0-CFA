@@ -7,7 +7,7 @@
 
 -export([cfa/1, parse_proc/1, newlabel/1, parse_expr/1, getPid/2]).
 
-% E ::= x | (E1 E2) | (/x.E) | n | (!e1 e2) | (#x.E)
+% E ::= x | (E1 E2) | (/x.E) | n | (!e1 e2) | (#x.E) ｜ (&e)
 
 % Pi ::= 0 | <M>n || Pi
 % 0 is the empty list of processes,
@@ -19,13 +19,18 @@ cfa(Input) ->
     LabelledTerm = reverse(LabelledPtree),
     Map = newmap(Ptree),
     Keys = getMessagekey(LabelledPtree, []),
+    News = getNew(LabelledPtree),
+    Newsnumber = length(News),
+    Keysnumber = length(Keys),
+    Newmap = generate(Keysnumber, Keysnumber + Newsnumber),
     Keymap = messagebox(Keys),
     Allmap = maps:merge(Map, Keymap),
+    Totalmap = maps:merge(Allmap, Newmap),
     Lams = getLambdas(LabelledPtree, []),
     Pids = getPid(LabelledPtree, []),
     Conlist = congen(LabelledPtree, Pids, Lams),
     io:fwrite("~s~n", [LabelledTerm]),
-    solve(Conlist, Allmap).
+    solve(Conlist, Totalmap).
 
 % ---------- Seq ---------- %
 
@@ -44,6 +49,9 @@ parse_expr([F | Rest]) when F >= $a, F =< $z; F >= $A, F =< $Z ->
 parse_expr([$\s | Rest]) ->
     % when space appear, skip the space
     parse_expr(Rest);
+parse_expr([$(, $& | Rest]) ->
+    {P, [$) | Rest1]} = parse_expr(Rest),
+    {{new, P}, Rest1};
 parse_expr([$(, $! | Rest]) ->
     % check if it is send
     {E, Rest1} = parse_expr(Rest),
@@ -128,6 +136,9 @@ label({pid, P}, N) ->
     {{pid, N, P}, N + 1};
 label({procid, P}, N) ->
     {{procid, P}, N};
+label({new, P}, N) ->
+    {LabelledP, N1} = label(P, N + 1),
+    {{new, N, LabelledP}, N1};
 label({proc, T, P}, N) ->
     {LabelledT, N1} = label(T, N),
     {{proc, LabelledT, P}, N1};
@@ -176,6 +187,11 @@ messagebox(Mkeys) ->
     KeyValueTuples = [{Key, []} || Key <- Mkeys],
     maps:from_list(KeyValueTuples).
 
+generate(In, Nn) ->
+    Keys = lists:seq(In + 1, Nn),
+    KeyValueTuples = [{{procid, I}, []} || I <- Keys],
+    maps:from_list(KeyValueTuples).
+
 % based on the label number, make corresponding maps
 
 % label(Tree, N) ->
@@ -207,6 +223,10 @@ reverse({pid, L, P}) ->
     String;
 reverse({procid, P}) ->
     String = io_lib:format("~c", [P]),
+    String;
+reverse({new, L, P}) ->
+    T1 = reverse(P),
+    String = io_lib:format("(&~s)'~p", [T1, L]),
     String;
 % reverse({conc, P1, P2}) ->
 %     T1 = reverse(P1),
@@ -290,6 +310,9 @@ getLambdas([{proc, T, _} | Rest], FinalList) ->
     List1 = getLambdas(T, FinalList),
     List2 = getLambdas(Rest, List1),
     List2;
+getLambdas({new, _, P}, FinalList) ->
+    List = getLambdas(P, FinalList),
+    List;
 getLambdas({app, _, E1, E2}, FinalList) ->
     List1 = getLambdas(E1, FinalList),
     List2 = getLambdas(E2, List1),
@@ -308,6 +331,9 @@ getLambdas([], FinalList) ->
 
 getPid({pid, L, P}, FinalList) ->
     [{pid, L, P} | FinalList];
+getPid({new, _, P}, FinalList) ->
+    List = getPid(P, FinalList),
+    List;
 getPid({lam, _, _, E}, FinalList) ->
     List = getPid(E, FinalList),
     List;
@@ -333,6 +359,8 @@ getPid([], FinalList) ->
 
 getMessagekey({procid, P}, FinalList) ->
     [{procid, P} | FinalList];
+getMessagekey({new, _, _}, FinalList) ->
+    FinalList;
 getMessagekey({pid, _, _}, FinalList) ->
     FinalList;
 getMessagekey({lam, _, _, E}, FinalList) ->
@@ -359,6 +387,17 @@ getMessagekey({_, _, _}, FinalList) ->
 getMessagekey([], FinalList) ->
     FinalList.
 
+getNew(Input) ->
+    case Input of
+        {new, L, P} -> [{new, L, P}];
+        {rec, _, _, E} -> getNew(E);
+        {lam, _, _, E} -> getNew(E);
+        {app, _, E1, E2} -> getNew(E1) ++ getNew(E2);
+        {send, _, E, M} -> getNew(E) ++ getNew(M);
+        [{proc, T, _} | Rest] -> getNew(T) ++ getNew(Rest);
+        _ -> []
+    end.
+
 check(V, {var, L, Var}) ->
     List = [X || X <- V, element(3, X) =:= Var],
     case List of
@@ -384,20 +423,34 @@ check(V, {send, _, E, M}) ->
 check(_, {rec, _, _, _}) ->
     [].
 
+checkatom(Input) ->
+    case Input of
+        {rec, L, M, E} -> [{rec, L, M, E}];
+        {new, _, P} -> checkatom(P);
+        {lam, _, _, E} -> checkatom(E);
+        {app, _, E1, E2} -> checkatom(E1) ++ checkatom(E2);
+        {send, _, E, M} -> checkatom(E) ++ checkatom(M);
+        _ -> []
+    end.
+
 congen({var, L, Var}, _, _) ->
     [{flow, {var, L, Var}, L}];
 congen({pid, L, P}, _, _) ->
     [{flow, {pid, L, P}, L}];
 congen({procid, _}, _, _) ->
     [];
+congen({new, L, P}, Pids, Lams) ->
+    C1 = congen(P, Pids, Lams),
+    [{flow, {new, L, P}, L}] ++ C1;
 congen([{proc, T, P} | Rest], Pids, Lams) ->
-    case T of
-        {rec, _, M, _} ->
+    Recs = checkatom(T),
+    case Recs of
+        [{rec, _, M, _} | _] ->
             C1 = congen(T, Pids, Lams),
             C2 = congen(P, Pids, Lams),
             C3 = congen(Rest, Pids, Lams),
             [{flow, {procid, element(2, P)}, element(2, lists:nth(1, M))}] ++ C1 ++ C2 ++ C3;
-        _ ->
+        [] ->
             C1 = congen(T, Pids, Lams),
             C2 = congen(P, Pids, Lams),
             C3 = congen(Rest, Pids, Lams),
@@ -459,6 +512,9 @@ process_flow(From, To, Map) ->
         {pid, L, P} ->
             Fun = fun(I) -> lists:uniq(I ++ [{pid, L, P}]) end,
             Newmap = maps:update_with(To, Fun, [{pid, L, P}], Map);
+        {new, L, P} ->
+            Fun = fun(I) -> lists:uniq(I ++ [{new, L, P}]) end,
+            Newmap = maps:update_with(To, Fun, [{new, L, P}], Map);
         {rec, L, M, E} ->
             Fun = fun(I) -> lists:uniq(I ++ [{rec, L, M, E}]) end,
             Newmap = maps:update_with(To, Fun, [{rec, L, M, E}], Map);
